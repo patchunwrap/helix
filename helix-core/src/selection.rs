@@ -700,6 +700,16 @@ impl Selection {
     pub fn contains(&self, other: &Selection) -> bool {
         is_subset::<true>(self.range_bounds(), other.range_bounds())
     }
+
+    /// returns true if any of the pointers contain more than 1 character
+    pub fn is_selecting(&self) -> bool {
+        for range in self.ranges() {
+            if range.anchor.abs_diff(range.head) > 1 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl<'a> IntoIterator for &'a Selection {
