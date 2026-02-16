@@ -31,8 +31,8 @@ use helix_view::{
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
 };
+use std::collections::HashMap;
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
-
 use tui::{buffer::Buffer as Surface, text::Span};
 
 pub struct EditorView {
@@ -615,15 +615,89 @@ impl EditorView {
         let mut x = viewport.x;
         let current_doc = view!(editor).doc;
 
+        // The following code adds prefixes to bufferlines to make it clear
+        // which file you are looking at when two files with the same name
+        // exists, for example:
+        //   mod.rs, lib.rs, foo.rs -> mod.rs, lib.rs, foo.rs
+        //   mod.rs, mod.rs         -> foo/mod.rs, bar/mod.rs
+        //   mod.rs, lib.rs, lib.rs -> mod.rs, ui/src/lib.rs, theme/src/lib.rs
+
+        // A hard cap on the number of iterations is recommended since
+        // otherwise bufferlines can become unhelpfully long. 2 folders added
+        // is probably enough since it handles the foo/src/main.rs and
+        // bar/src/lib.rs cases.
+        const BUFFERLINE_PREPEND_ITERATIONS: usize = 2;
+
+        let mut name_counts: HashMap<String, usize> =
+            HashMap::with_capacity(editor.documents.len());
+        let mut docs_names_paths: Vec<(&Document, String, Option<PathBuf>)> =
+            Vec::with_capacity(editor.documents.len());
+
+        // Generate an initial list
         for doc in editor.documents() {
-            let fname = doc
+            let default_name = doc
                 .path()
                 .unwrap_or(&scratch)
                 .file_name()
                 .unwrap_or_default()
                 .to_str()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .to_string();
 
+            let path = doc.path().cloned();
+
+            if let Some(duplicates_count) = name_counts.get_mut(&default_name) {
+                *duplicates_count += 1;
+            } else {
+                name_counts.insert(default_name.clone(), 1);
+            }
+            docs_names_paths.push((doc, default_name, path));
+        }
+        // Deduplicate for n iterations
+        // each iteration if the item is a duplicate, add a folder to it
+        for i in 0..BUFFERLINE_PREPEND_ITERATIONS {
+            for (_, name, path) in docs_names_paths.iter_mut() {
+                // Skip scratch files
+                let Some(path) = path else {
+                    continue;
+                };
+
+                // If the name doesn't appear in the existing
+                // list it isn't a duplicate
+                let Some(duplicates_count) = name_counts.get(name) else {
+                    name_counts.insert(name.clone(), 1);
+                    continue;
+                };
+
+                // Skip non duplicates
+                // (If the count was 1, we found the one instance of itself)
+                if *duplicates_count < 2 {
+                    continue;
+                }
+
+                // Add folder to the name and replace it
+                // If none, it's impossible to provide more context to what this
+                // bufferline is
+                let Some(prepend_folder) = path.components().nth_back(i + 1) else {
+                    continue;
+                };
+                let Some(prepend_folder) = prepend_folder.as_os_str().to_str() else {
+                    continue;
+                };
+                *name = format!("{prepend_folder}/{name}");
+
+                // Add the name to the deduplication list
+                // Handling the following case:
+                //    theme/mod.rs, theme/mod.rs -> ui/theme/mod.rs, generated/theme/mod.rs
+                if let Some(duplicates_count) = name_counts.get_mut(name) {
+                    *duplicates_count += 1;
+                } else {
+                    name_counts.insert(name.clone(), 1);
+                }
+            }
+        }
+
+        for (doc, fname, _) in docs_names_paths {
             let style = if current_doc == doc.id() {
                 bufferline_active
             } else {
